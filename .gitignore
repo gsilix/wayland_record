@@ -1,0 +1,10 @@
+# Recording sessions and legacy recordings
+conference_*/
+conference_*.mp4
+raw_video.mp4
+browser.wav
+mic.wav
+
+# Python test cache
+__pycache__/
+*.py[cod]
