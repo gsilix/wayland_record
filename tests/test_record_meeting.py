@@ -18,6 +18,9 @@ FAKE_TOOL = r'''
 import json, os, pathlib, shutil, signal, sys, time
 name = pathlib.Path(sys.argv[0]).name
 args = sys.argv[1:]
+# Exercise scheduling where the microphone logs its startup before system audio.
+if name == "pw-record" and pathlib.Path(args[-1]).name == "system.wav":
+    time.sleep(float(os.environ.get("TEST_SYSTEM_START_DELAY", "0")))
 with open(os.environ["TEST_EVENTS"], "a") as f:
     f.write(json.dumps({"tool": name, "pid": os.getpid(), "args": args}) + "\n")
 if name == "date":
@@ -187,7 +190,7 @@ class RecorderTests(unittest.TestCase):
     def test_success_for_each_stop_signal(self):
         for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
             with self.subTest(signal=sig):
-                proc, path = self.start()
+                proc, path = self.start(extra={"TEST_SYSTEM_START_DELAY": "0.15"})
                 self.wait_started(proc, path)
                 self.assertEqual(self.finish(proc, sig), 0, path.read_text())
                 self.assertIn("Recording complete", path.read_text())
@@ -197,10 +200,22 @@ class RecorderTests(unittest.TestCase):
         self.assertTrue((self.output / "conference_2026-10-06_14-30-00_1.mp4").exists())
         self.assertTrue((self.output / "conference_2026-10-06_14-30-00_2.mp4").exists())
         self.assert_captures_stopped()
-        audio = self.calls("pw-record")
-        self.assertEqual(audio[0]["args"][1], "alsa_output.test+sink.1")
-        self.assertIn('"stream.capture.sink":true', " ".join(audio[0]["args"]))
-        self.assertEqual(audio[1]["args"][1], "alsa_input.test+mic.1")
+        # Background processes can report startup in either order. Identify each
+        # capture by its output filename and check every run of each source.
+        audio_by_source = {"system.wav": [], "mic.wav": []}
+        for call in self.calls("pw-record"):
+            source = Path(call["args"][-1]).name
+            self.assertIn(source, audio_by_source)
+            audio_by_source[source].append(call)
+        for source, target in (("system.wav", "alsa_output.test+sink.1"),
+                               ("mic.wav", "alsa_input.test+mic.1")):
+            self.assertEqual(len(audio_by_source[source]), 3)
+            for call in audio_by_source[source]:
+                args = call["args"]
+                self.assertEqual(args[args.index("--target") + 1], target)
+                properties = json.loads(args[args.index("--properties") + 1])
+                self.assertEqual(properties.get("stream.capture.sink", False),
+                                 source == "system.wav")
 
     def test_quality_and_offsets(self):
         proc, path = self.start("--crf", "20", "--preset", "veryfast",
